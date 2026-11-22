@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.db import _meta_get, _meta_set, ensure_db, get_db
+from app.db import _backfill_landings, _meta_get, _meta_set, ensure_db, get_db
 
 
 def seed_if_needed(db_path: str | None = None) -> None:
@@ -104,12 +104,18 @@ def seed_if_needed(db_path: str | None = None) -> None:
             "INSERT INTO review_tickets(ticket_code, row_id, decision, reviewer, comment) VALUES (?,?,?,?,?)",
             ("REV-001", row_id, "待决", "", "等待复核"),
         )
+        # 历史入舱样例也要有落点行，避免“有标记无落点”的初始漂件。
+        _backfill_landings(conn)
         for bid in batch_ids:
             cnt = conn.execute(
                 "SELECT COUNT(*) AS c FROM capture_items WHERE batch_id=?", (bid,)
             ).fetchone()["c"]
             bad = conn.execute(
-                "SELECT COUNT(*) AS c FROM capture_items WHERE batch_id=? AND quality!='合格'",
+                """
+                SELECT COUNT(*) AS c FROM capture_items i
+                WHERE i.batch_id=? AND i.quality!='合格'
+                  AND NOT EXISTS (SELECT 1 FROM enter_landings l WHERE l.item_id=i.id)
+                """,
                 (bid,),
             ).fetchone()["c"]
             conn.execute(
@@ -122,9 +128,10 @@ def seed_if_needed(db_path: str | None = None) -> None:
             VALUES ('system', '种子初始化', 'lab', 0, '首次启动写入样例')
             """
         )
-        try:
-            from app.services.enter_pack import seed_skew
-            seed_skew(db_path)
-        except Exception:
-            pass
         _meta_set(conn, "seeded", "1")
+    # 只读口径在种子事务提交后写入，避免自锁等待。
+    try:
+        from app.services.enter_pack import seed_skew
+        seed_skew(db_path)
+    except Exception:
+        pass

@@ -20,7 +20,6 @@ from app.services import rework as rework_svc
 from app.services import settings as settings_svc
 from app.services import enter_pack as enter_pack_svc
 from app.services import enter_pack_cutover as enter_pack_cutover_svc
-from app.services import enter_pack_dualwrite as enter_pack_dual_svc
 from app.services import sources as sources_svc
 from app.services.errors import ServiceError
 
@@ -313,33 +312,27 @@ def create_app():
             _require(request)
             return _json(enter_pack_cutover_svc.board())
 
+        def enter_pack_overview(request):
+            _require(request)
+            return _json(enter_pack_svc.overview())
+
+        def enter_pack_gate(request):
+            _require(request)
+            return _json(enter_pack_svc.gate_status())
+
+        def enter_pack_landings(request):
+            _require(request)
+            return _json({"items": enter_pack_cutover_svc.landing_rows()})
+
         def enter_pack_commit(request):
+            # 甲边没有“只点亮芯片”的落台动作：入舱必须走 /api/quarantine/enter 落行。
             _require(request)
             body = _read_json(request)
-            return _json(enter_pack_svc.commit_action(body))
-
-        def enter_pack_half(request):
-            _require(request)
-            return _json(enter_pack_svc.reconcile_display())
-
-        def enter_pack_snap(request):
-            _require(request)
-            return _json(enter_pack_svc.snapshot())
-
-        def enter_pack_cutover(request):
-            _require(request)
-            body = _read_json(request)
-            return _json(
-                enter_pack_cutover_svc.append_cutover(
-                    int(body.get("ref_id") or 0),
-                    str(body.get("note") or "入舱钉定"),
-                )
-            )
-
-        def enter_pack_dual(request):
-            _require(request)
-            body = _read_json(request)
-            return _json(enter_pack_dual_svc.apply_dualwrite(str(body.get("note") or "入舱钉定")))
+            item_id = int(body.get("item_id") or 0)
+            bin_id = int(body.get("bin_id") or 0)
+            if not item_id or not bin_id:
+                raise ServiceError("入舱落点需 item_id 与 bin_id，芯片不可单独点亮")
+            return _json(quarantine_svc.enter_item(item_id, bin_id, body.get("reason", "")))
 
         def audits_list(request):
             _require(request)
@@ -380,11 +373,10 @@ def create_app():
         config.add_route("rule_apply", "/api/rules/apply")
         config.add_route("audits", "/api/audits")
         config.add_route("enter_pack_dash", "/api/enter_pack/dash")
+        config.add_route("enter_pack_overview", "/api/enter_pack/overview")
+        config.add_route("enter_pack_gate", "/api/enter_pack/gate")
+        config.add_route("enter_pack_landings", "/api/enter_pack/landings")
         config.add_route("enter_pack_commit", "/api/enter_pack/commit")
-        config.add_route("enter_pack_half", "/api/enter_pack/half")
-        config.add_route("enter_pack_snap", "/api/enter_pack/snap")
-        config.add_route("enter_pack_cutover", "/api/enter_pack/cutover")
-        config.add_route("enter_pack_dual", "/api/enter_pack/dual")
 
 
         config.add_view(root, route_name="root")
@@ -424,11 +416,10 @@ def create_app():
         config.add_view(wrap(rule_apply), route_name="rule_apply", request_method="POST")
         config.add_view(wrap(audits_list), route_name="audits", request_method="GET")
         config.add_view(wrap(enter_pack_dash), route_name="enter_pack_dash", request_method="GET")
+        config.add_view(wrap(enter_pack_overview), route_name="enter_pack_overview", request_method="GET")
+        config.add_view(wrap(enter_pack_gate), route_name="enter_pack_gate", request_method="GET")
+        config.add_view(wrap(enter_pack_landings), route_name="enter_pack_landings", request_method="GET")
         config.add_view(wrap(enter_pack_commit), route_name="enter_pack_commit", request_method="POST")
-        config.add_view(wrap(enter_pack_half), route_name="enter_pack_half", request_method="POST")
-        config.add_view(wrap(enter_pack_snap), route_name="enter_pack_snap", request_method="GET")
-        config.add_view(wrap(enter_pack_cutover), route_name="enter_pack_cutover", request_method="POST")
-        config.add_view(wrap(enter_pack_dual), route_name="enter_pack_dual", request_method="POST")
 
 
         return config.make_wsgi_app()

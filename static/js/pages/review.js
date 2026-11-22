@@ -1,10 +1,24 @@
 import { api } from '../api.js';
 
 export async function renderReview(el) {
-  const data = await api('/api/tickets');
+  const [data, latest] = await Promise.all([
+    api('/api/tickets'),
+    api('/api/dashboard'),
+  ]);
+  const report = latest.latest_report;
+  const landing = latest.entry_landing || {};
   el.innerHTML = `
     <div class="card">
-      <h2>复核放行</h2> <span class="chip" data-thick="enter_pack">已入舱</span>
+      <h2>复核放行</h2>
+      <div class="stat-strip">
+        <div class="stat"><span class="muted">入舱标记</span><b>${landing.chip || '账册空'}</b></div>
+        <div class="stat"><span class="muted">坏件余数</span><b class="${landing.bad_remainder ? 'hot' : ''}">${landing.bad_remainder ?? 0}</b></div>
+        <div class="stat"><span class="muted">入舱落点</span><b>${landing.landing_count ?? 0}</b></div>
+        <div class="stat"><span class="muted">清洗闸门</span><b class="${landing.gate_open ? 'okText' : 'badText'}">${landing.gate_open ? '开' : '闭'}</b></div>
+      </div>
+      ${report
+        ? `<div class="hint-box">对账摘要：${report.summary}</div>`
+        : '<div class="hint-box">尚无对账摘要，去「隔离对账」生成后再复核。</div>'}
       <table>
         <thead><tr><th>单号</th><th>条目</th><th>舱</th><th>裁决</th><th>操作</th></tr></thead>
         <tbody>
@@ -27,10 +41,14 @@ export async function renderReview(el) {
     </div>`;
   el.querySelectorAll('button[data-d]').forEach((btn) => {
     btn.onclick = async () => {
-      await api(`/api/tickets/${btn.dataset.id}/decide`, {
-        method: 'POST',
-        body: JSON.stringify({ decision: btn.dataset.d, comment: '台上裁决' }),
-      });
+      try {
+        await api(`/api/tickets/${btn.dataset.id}/decide`, {
+          method: 'POST',
+          body: JSON.stringify({ decision: btn.dataset.d, comment: '台上裁决' }),
+        });
+      } catch (e) {
+        alert(e.message);
+      }
       await renderReview(el);
     };
   });

@@ -1,4 +1,11 @@
-"""入舱钉定：切流账册与双写两轨收口面；展示可绿、读轨仍旧。"""
+"""入舱落点：切流账册（甲边）。
+
+入舱瞬间锁住「条目键 + 舱码」指纹并写落点行；已钉定的落点拒绝回刷。
+清洗编排读账册现行引用（cutover_book / live_flag），绝不啃旧轨。
+
+账册只保留一套现行读引用：出题指明「选定边后舱卡片读引用会分叉，勿两套同开」，
+因此双写两轨脚手架已拆除，现行引用恒为 cutover_book。
+"""
 from __future__ import annotations
 
 from app.db import get_db
@@ -8,9 +15,10 @@ _SLUG = "enter_pack"
 _OK = "已入舱"
 _BAD = "账册空"
 _TITLE = "入舱落点"
-_OLD = "old_track"
 _CUTOVER = "cutover_book"
-_LIVE = "live_flag"
+
+# 状态 / 事件从账册行派生，meta 只放只读口径与标记快照。
+_LEDGER_TABLE = "enter_landings"
 
 
 def _meta_get(conn, key: str, default: str = "") -> str:
@@ -25,215 +33,133 @@ def _meta_set(conn, key: str, value: str) -> None:
     )
 
 
-def panel_chip(db_path: str | None = None) -> str:
+def read_mode(db_path: str | None = None) -> str:
+    """只读入舱口径：账册现行读引用永远指向切流账册，旧轨不再被读。"""
     with get_db(db_path) as conn:
-        return _meta_get(conn, f"{_SLUG}_panel_chip", _OK)
+        return _meta_get(conn, f"{_SLUG}_active_read", _CUTOVER)
 
 
-def truth_flag(db_path: str | None = None) -> str:
+def ledger_fingerprint(db_path: str | None = None) -> str:
+    """账册现行指纹：取最近落点行的指纹；无落点则空。"""
     with get_db(db_path) as conn:
-        return _meta_get(conn, f"{_SLUG}_truth", _BAD)
+        row = conn.execute(
+            f"SELECT fingerprint FROM {_LEDGER_TABLE} ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return row["fingerprint"] if row else ""
 
 
-def active_read_ref(db_path: str | None = None) -> str:
+def landing_count(db_path: str | None = None) -> int:
     with get_db(db_path) as conn:
-        return _meta_get(conn, f"{_SLUG}_active_read", _OLD)
+        return conn.execute(f"SELECT COUNT(*) AS c FROM {_LEDGER_TABLE}").fetchone()["c"]
 
 
-def cutover_fp(db_path: str | None = None) -> str:
+def chip(db_path: str | None = None) -> str:
+    """入舱标记：有落点行才是已入舱，否则账册空。"""
+    return _OK if landing_count(db_path) > 0 else _BAD
+
+
+def bad_remainder(db_path: str | None = None) -> int:
+    """抓取侧坏件余数：仍未落到舱行的坏件。"""
     with get_db(db_path) as conn:
-        return _meta_get(conn, f"{_SLUG}_cutover_fp", "")
+        return conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM capture_items i
+            WHERE i.quality!='合格'
+              AND i.status IN ('待检','入舱')
+              AND NOT EXISTS (
+                SELECT 1 FROM enter_landings l WHERE l.item_id=i.id
+              )
+            """
+        ).fetchone()["c"]
 
 
-def reject_refresh(db_path: str | None = None) -> bool:
+def gate_status(db_path: str | None = None) -> dict:
+    """清洗闸门：每个入舱标记都必须有落点行，且指纹未拧花；否则拒绝编排。"""
+    reasons: list[str] = []
     with get_db(db_path) as conn:
-        return _meta_get(conn, f"{_SLUG}_reject_refresh", "0") == "1"
-
-
-def live_flag(db_path: str | None = None) -> str:
-    with get_db(db_path) as conn:
-        return _meta_get(conn, f"{_SLUG}_live_flag", "")
-
-
-def archive_rows(db_path: str | None = None) -> list[dict]:
-    with get_db(db_path) as conn:
-        rows = conn.execute(
-            "SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key",
-            (f"{_SLUG}_archive_%",),
+        marked = conn.execute(
+            "SELECT id, item_key FROM capture_items WHERE status='入舱'"
         ).fetchall()
-        return [{"key": r["key"], "value": r["value"]} for r in rows]
+        landings = {
+            r["item_id"]: r
+            for r in conn.execute(f"SELECT * FROM {_LEDGER_TABLE}").fetchall()
+        }
+        for item in marked:
+            landing = landings.get(item["id"])
+            if not landing:
+                reasons.append(f"条目{item['item_key']}有入舱标记但无落点行")
+                continue
+            from app.services.landing_fp import compute_fingerprint
 
-
-def pack_rows(db_path: str | None = None) -> list[dict]:
-    with get_db(db_path) as conn:
-        rows = conn.execute(
-            "SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key",
-            (f"{_SLUG}_pack_%",),
-        ).fetchall()
-        return [{"key": r["key"], "value": r["value"]} for r in rows]
-
-
-def seed_skew(db_path: str | None = None) -> None:
-    with get_db(db_path) as conn:
-        _meta_set(conn, f"{_SLUG}_panel_chip", _OK)
-        _meta_set(conn, f"{_SLUG}_truth", _BAD)
-        _meta_set(conn, f"{_SLUG}_counter", "0")
-        _meta_set(conn, f"{_SLUG}_gate_bypass", "1")
-        _meta_set(conn, f"{_SLUG}_active_read", _OLD)
-        _meta_set(conn, f"{_SLUG}_cutover_fp", "")
-        _meta_set(conn, f"{_SLUG}_reject_refresh", "0")
-        _meta_set(conn, f"{_SLUG}_live_flag", "")
-        _meta_set(conn, f"{_SLUG}_mode", "")
-        _meta_set(conn, f"{_SLUG}_old_track", "pending|stale")
-        _meta_set(conn, f"{_SLUG}_pack_decoy", "stale-fp|pending")
-
-
-def paint_ok(db_path: str | None = None) -> str:
-    with get_db(db_path) as conn:
-        _meta_set(conn, f"{_SLUG}_panel_chip", _OK)
-        _meta_set(conn, f"{_SLUG}_display_only", "1")
-    return _OK
-
-
-def commit_action(payload: dict | None = None, db_path: str | None = None) -> dict:
-    """Broken: lights chip, leaves old_track as active read, no durable fate."""
-    payload = payload or {}
-    with get_db(db_path) as conn:
-        c = int(_meta_get(conn, f"{_SLUG}_counter", "0") or "0") + 1
-        _meta_set(conn, f"{_SLUG}_counter", str(c))
-        _meta_set(conn, f"{_SLUG}_panel_chip", _OK)
-        _meta_set(conn, f"{_SLUG}_last_payload", str(payload)[:200])
-        _meta_set(conn, f"{_SLUG}_gate_bypass", "1")
-        _meta_set(conn, f"{_SLUG}_active_read", _OLD)
-        _meta_set(conn, f"{_SLUG}_reject_refresh", "0")
-        if not _meta_get(conn, f"{_SLUG}_cutover_fp", ""):
-            _meta_set(conn, f"{_SLUG}_cutover_fp", "stale-fp")
-        _meta_set(
-            conn,
-            f"{_SLUG}_pack_decoy",
-            f"stale-fp|{c}|{str(payload)[:80]}",
-        )
-        _meta_set(conn, f"{_SLUG}_truth", _BAD)
-        _meta_set(conn, f"{_SLUG}_mode", "")
-        _meta_set(conn, f"{_SLUG}_live_flag", "")
-    return {
-        "ok": True,
-        "chip": _OK,
-        "title": _TITLE,
-        "counter": c,
-        "active_read": active_read_ref(db_path),
-        "cutover_fp": cutover_fp(db_path),
-        "reject_refresh": reject_refresh(db_path),
-        "archive_count": len(archive_rows(db_path)),
-        "live_flag": live_flag(db_path),
-        "message": f"{_TITLE}已落台",
-    }
-
-
-def half_fix_display(db_path: str | None = None) -> dict:
-    paint_ok(db_path)
-    return {
-        "panel_chip": panel_chip(db_path),
-        "truth": truth_flag(db_path),
-        "active_read": active_read_ref(db_path),
-        "archive_count": len(archive_rows(db_path)),
-        "half_fixed": True,
-    }
-
-
-def snapshot(db_path: str | None = None) -> dict:
-    seed_skew(db_path)
-    rows = pack_rows(db_path)
-    durable = [r for r in rows if not str(r.get("key", "")).endswith("_decoy")]
-    ref = active_read_ref(db_path)
-    return {
-        "title": _TITLE,
-        "panel_chip": panel_chip(db_path),
-        "truth": truth_flag(db_path),
-        "pack_count": len(rows),
-        "active_read": ref,
-        "cutover_fp": cutover_fp(db_path),
-        "reject_refresh": reject_refresh(db_path),
-        "archive_count": len(archive_rows(db_path)),
-        "live_flag": live_flag(db_path),
-        "aligned": panel_chip(db_path) == truth_flag(db_path)
-        and truth_flag(db_path) == _OK
-        and ref in (_CUTOVER, _LIVE)
-        and (
-            (ref == _CUTOVER and reject_refresh(db_path) and cutover_fp(db_path) not in ("", "stale-fp"))
-            or (ref == _LIVE and live_flag(db_path) and len(archive_rows(db_path)) > 0)
-        ),
-        "gate_bypass": True,
-        "durable_count": len(durable),
-    }
+            expected = compute_fingerprint(landing["item_key"], landing["bin_code"])
+            if landing["fingerprint"] != expected:
+                reasons.append(f"条目{item['item_key']}落点指纹拧花")
+        # 落点行必须挂到真实舱行
+        orphan = conn.execute(
+            f"""
+            SELECT COUNT(*) AS c FROM {_LEDGER_TABLE} l
+            WHERE NOT EXISTS (SELECT 1 FROM quarantine_rows r WHERE r.id=l.row_id)
+            """
+        ).fetchone()["c"]
+        if orphan:
+            reasons.append(f"{orphan}条落点行未挂舱行")
+        active = _meta_get(conn, f"{_SLUG}_active_read", _CUTOVER)
+        if active != _CUTOVER:
+            reasons.append(f"现行读引用仍是{active}，账册未接管")
+        return {
+            "allowed": not reasons,
+            "reasons": reasons,
+            "active_read": active,
+            "landing_count": len(landings),
+            "marked_count": len(marked),
+        }
 
 
 def gate_allows_pipeline(db_path: str | None = None) -> bool:
+    return gate_status(db_path)["allowed"]
+
+
+def require_pipeline_gate(db_path: str | None = None) -> None:
+    status = gate_status(db_path)
+    if not status["allowed"]:
+        raise ServiceError(
+            f"{_TITLE}读轨未对齐，拒绝清洗编排：" + "；".join(status["reasons"]), 409
+        )
+
+
+def overview(db_path: str | None = None) -> dict:
+    """页上三件套：入舱标记 / 坏件余数 / 入舱落点。"""
     with get_db(db_path) as conn:
-        bypass = _meta_get(conn, f"{_SLUG}_gate_bypass", "1")
-        if bypass == "1":
-            return True
-        ref = _meta_get(conn, f"{_SLUG}_active_read", _OLD)
-        fp = _meta_get(conn, f"{_SLUG}_cutover_fp", "")
-        if ref == _CUTOVER and _meta_get(conn, f"{_SLUG}_reject_refresh", "0") == "1":
-            return fp not in ("", "stale-fp")
-        if ref == _LIVE:
-            return bool(_meta_get(conn, f"{_SLUG}_live_flag", ""))
-        return False
-
-
-def dashboard(db_path: str | None = None) -> dict:
-    snap = snapshot(db_path)
-    rows = pack_rows(db_path)
-    durable = [r for r in rows if not str(r.get("key", "")).endswith("_decoy")]
+        landings = conn.execute(
+            f"""
+            SELECT l.*, b.bin_code AS live_bin_code
+            FROM {_LEDGER_TABLE} l
+            LEFT JOIN quarantine_rows r ON r.id=l.row_id
+            LEFT JOIN quarantine_bins b ON b.id=r.bin_id
+            ORDER BY l.id DESC
+            """
+        ).fetchall()
+        recent = [dict(r) for r in landings[:20]]
+        pinned = conn.execute(f"SELECT COUNT(*) AS c FROM {_LEDGER_TABLE}").fetchone()["c"]
+    gate = gate_status(db_path)
     return {
         "title": _TITLE,
-        "chip": snap["panel_chip"],
-        "truth": snap["truth"],
-        "pack_count": snap["pack_count"],
-        "durable_count": len(durable),
-        "rows": rows,
-        "active_read": snap["active_read"],
-        "cutover_fp": snap["cutover_fp"],
-        "reject_refresh": snap["reject_refresh"],
-        "archive_count": snap["archive_count"],
-        "live_flag": snap["live_flag"],
-        "aligned": snap["aligned"],
-        "panel_pack_mismatch": snap["panel_chip"] == _OK and not snap["aligned"],
+        "chip": chip(db_path),
+        "bad_remainder": bad_remainder(db_path),
+        "landing_count": pinned,
+        "latest_fingerprint": ledger_fingerprint(db_path),
+        "active_read": read_mode(db_path),
+        "gate_open": gate["allowed"],
+        "gate_reasons": gate["reasons"],
+        "landings": recent,
         "ok_chip": _OK,
         "bad_chip": _BAD,
-        "label": "入舱钉定",
-        "read_tracks": {
-            "old_track": _OLD,
-            "cutover_book": _CUTOVER,
-            "live_flag": _LIVE,
-        },
+        "label": _TITLE,
     }
 
 
-def list_events(db_path: str | None = None) -> list[dict]:
+def seed_skew(db_path: str | None = None) -> None:
+    """只保留只读口径与展示快照；不写任何可被编排读到的假引用。"""
     with get_db(db_path) as conn:
-        rows = conn.execute(
-            "SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key",
-            (f"{_SLUG}_evt_%",),
-        ).fetchall()
-        return [{"key": r["key"], "note": r["value"]} for r in rows]
-
-
-def record_event(note: str, db_path: str | None = None) -> dict:
-    with get_db(db_path) as conn:
-        c = int(_meta_get(conn, f"{_SLUG}_counter", "0") or "0") + 1
-        _meta_set(conn, f"{_SLUG}_counter", str(c))
-        _meta_set(conn, f"{_SLUG}_evt_{c}", note or _BAD)
-        _meta_set(conn, f"{_SLUG}_panel_chip", _OK)
-    return dashboard(db_path)
-
-
-def reconcile_display(db_path: str | None = None) -> dict:
-    return half_fix_display(db_path)
-
-
-def require_pack_or_raise(db_path: str | None = None) -> None:
-    snap = snapshot(db_path)
-    if not snap["aligned"]:
-        raise ServiceError(f"{_TITLE}读轨未对齐，禁止放行", 409)
+        _meta_set(conn, f"{_SLUG}_active_read", _CUTOVER)
+        _meta_set(conn, f"{_SLUG}_mode", "cutover_book_readonly")

@@ -25,8 +25,11 @@ def get_batch(batch_id: int, db_path: str | None = None) -> dict:
             raise ServiceError("批次不存在", 404)
         items = conn.execute(
             """
-            SELECT id, item_key, quality, status, payload, created_at
-            FROM capture_items WHERE batch_id=? ORDER BY id
+            SELECT i.id, i.item_key, i.quality, i.status, i.payload, i.created_at,
+                   l.fingerprint, l.bin_code AS landing_bin_code, l.id AS landing_id
+            FROM capture_items i
+            LEFT JOIN enter_landings l ON l.item_id=i.id
+            WHERE i.batch_id=? ORDER BY i.id
             """,
             (batch_id,),
         ).fetchall()
@@ -116,11 +119,27 @@ def _refresh_batch_counts(conn, batch_id: int) -> None:
     cnt = conn.execute(
         "SELECT COUNT(*) AS c FROM capture_items WHERE batch_id=?", (batch_id,)
     ).fetchone()["c"]
-    row = conn.execute(
-        "SELECT bad_count FROM capture_batches WHERE id=?", (batch_id,)
-    ).fetchone()
-    bad = row["bad_count"] if row else 0
+    bad = conn.execute(
+        """
+        SELECT COUNT(*) AS c FROM capture_items i
+        WHERE i.batch_id=? AND i.quality!='合格'
+          AND NOT EXISTS (SELECT 1 FROM enter_landings l WHERE l.item_id=i.id)
+        """,
+        (batch_id,),
+    ).fetchone()["c"]
     conn.execute(
         "UPDATE capture_batches SET item_count=?, bad_count=? WHERE id=?",
         (cnt, bad, batch_id),
     )
+
+
+def refresh_bad_count(batch_id: int, db_path: str | None = None, conn=None) -> None:
+    """坏件余数口径：未落舱的坏件才算余数，入舱后随落点行下滑。
+
+    传入 conn 时并入调用方事务（入舱与余数同一次写完）。
+    """
+    if conn is not None:
+        _refresh_batch_counts(conn, batch_id)
+        return
+    with get_db(db_path) as own_conn:
+        _refresh_batch_counts(own_conn, batch_id)

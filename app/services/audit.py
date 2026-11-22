@@ -12,23 +12,31 @@ def write_event(
     detail: str = "",
     actor: str = "admin",
     db_path: str | None = None,
+    conn=None,
 ) -> dict:
+    """写审计事件；传入 conn 时并入调用方事务，不单独提交。"""
     action = (action or "").strip()
     entity_type = (entity_type or "").strip()
     if not action or not entity_type:
         raise ServiceError("审计动作不完整")
-    with get_db(db_path) as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO audit_events(actor, action, entity_type, entity_id, detail)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (actor or "admin", action, entity_type, int(entity_id or 0), detail or ""),
-        )
-        row = conn.execute(
-            "SELECT * FROM audit_events WHERE id=?", (cur.lastrowid,)
-        ).fetchone()
-        return dict(row)
+    if conn is not None:
+        return _insert_event(conn, action, entity_type, entity_id, detail, actor)
+    with get_db(db_path) as own_conn:
+        return _insert_event(own_conn, action, entity_type, entity_id, detail, actor)
+
+
+def _insert_event(conn, action, entity_type, entity_id, detail, actor) -> dict:
+    cur = conn.execute(
+        """
+        INSERT INTO audit_events(actor, action, entity_type, entity_id, detail)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (actor or "admin", action, entity_type, int(entity_id or 0), detail or ""),
+    )
+    row = conn.execute(
+        "SELECT * FROM audit_events WHERE id=?", (cur.lastrowid,)
+    ).fetchone()
+    return dict(row)
 
 
 def list_events(limit: int = 100, db_path: str | None = None) -> list[dict]:

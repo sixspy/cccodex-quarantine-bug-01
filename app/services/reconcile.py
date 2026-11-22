@@ -14,6 +14,14 @@ def list_reports(db_path: str | None = None) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def latest_report(db_path: str | None = None) -> dict | None:
+    with get_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM reconcile_reports ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def run_reconcile(db_path: str | None = None) -> dict:
     label = settings_svc.get_value("reconcile_label", "隔离对账", db_path)
     with get_db(db_path) as conn:
@@ -29,20 +37,32 @@ def run_reconcile(db_path: str | None = None) -> dict:
         abandoned = conn.execute(
             "SELECT COUNT(*) AS c FROM quarantine_rows WHERE status='已废弃'"
         ).fetchone()["c"]
-        # mismatch: item says 入舱 but no open quarantine row
+        # mismatch: item says 入舱 but no landing row / no open quarantine row
         mismatch = conn.execute(
             """
             SELECT COUNT(*) AS c FROM capture_items i
             WHERE i.status='入舱'
-              AND NOT EXISTS (
-                SELECT 1 FROM quarantine_rows r
-                WHERE r.item_id=i.id AND r.status IN ('待复核','回炉中')
-              )
+              AND NOT EXISTS (SELECT 1 FROM enter_landings l WHERE l.item_id=i.id)
+            """
+        ).fetchone()["c"]
+        # drift: bad item left 待检 but already has a landing row (编排吞漂件)
+        drift = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM capture_items i
+            JOIN enter_landings l ON l.item_id=i.id
+            WHERE i.status='待检'
+            """
+        ).fetchone()["c"]
+        bad_remainder = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM capture_items i
+            WHERE i.quality!='合格' AND i.status IN ('待检','入舱')
+              AND NOT EXISTS (SELECT 1 FROM enter_landings l WHERE l.item_id=i.id)
             """
         ).fetchone()["c"]
         summary = (
             f"{label}：待复核{open_rows} / 已放行{released} / 回炉中{reworking} / "
-            f"已废弃{abandoned} / 错位{mismatch}"
+            f"已废弃{abandoned} / 错位{mismatch} / 漂件{drift} / 坏件余数{bad_remainder}"
         )
         cur = conn.execute(
             """
@@ -61,8 +81,10 @@ def run_reconcile(db_path: str | None = None) -> dict:
 
 
 def dashboard(db_path: str | None = None) -> dict:
-    from app.services.enter_pack_audit import audit_summary as _enter_pack_audit
+    from app.services import enter_pack as enter_pack_svc
     with get_db(db_path) as conn:
+        overview = enter_pack_svc.overview(db_path)
+        latest = latest_report(db_path)
         return {
             "batches": conn.execute("SELECT COUNT(*) AS c FROM capture_batches").fetchone()["c"],
             "items": conn.execute("SELECT COUNT(*) AS c FROM capture_items").fetchone()["c"],
@@ -81,5 +103,12 @@ def dashboard(db_path: str | None = None) -> dict:
                 "SELECT COUNT(*) AS c FROM policy_rules WHERE enabled=1"
             ).fetchone()["c"],
             "audits": conn.execute("SELECT COUNT(*) AS c FROM audit_events").fetchone()["c"],
-            "enter_pack_audit": _enter_pack_audit(db_path),
+            "entry_landing": {
+                "chip": overview["chip"],
+                "bad_remainder": overview["bad_remainder"],
+                "landing_count": overview["landing_count"],
+                "active_read": overview["active_read"],
+                "gate_open": overview["gate_open"],
+            },
+            "latest_report": latest,
         }

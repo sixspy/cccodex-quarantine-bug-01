@@ -83,6 +83,17 @@ CREATE TABLE IF NOT EXISTS quarantine_rows (
   UNIQUE(item_id)
 );
 
+CREATE TABLE IF NOT EXISTS enter_landings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id INTEGER NOT NULL UNIQUE REFERENCES capture_items(id),
+  row_id INTEGER NOT NULL UNIQUE REFERENCES quarantine_rows(id),
+  item_key TEXT NOT NULL,
+  bin_code TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS review_tickets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ticket_code TEXT NOT NULL UNIQUE,
@@ -136,17 +147,72 @@ def ensure_db() -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as conn:
         conn.executescript(SCHEMA)
+        _backfill_landings(conn)
+        _retire_dualwrite_keys(conn)
         conn.commit()
     return path
 
 
+def _retire_dualwrite_keys(conn: sqlite3.Connection) -> None:
+    """旧库清理已拆除的双写两轨 / 半修脚手架，避免现行读引用分叉。"""
+    conn.execute(
+        "DELETE FROM meta WHERE key LIKE 'enter_pack_dual%' "
+        "OR key LIKE 'enter_pack_archive_%' "
+        "OR key LIKE 'enter_pack_pack_%' "
+        "OR key LIKE 'enter_pack_cutover_note_%' "
+        "OR key IN ('enter_pack_live_flag', 'enter_pack_reject_refresh', "
+        "'enter_pack_cutover_fp', 'enter_pack_truth', 'enter_pack_gate_bypass', "
+        "'enter_pack_panel_chip', 'enter_pack_display_only', 'enter_pack_last_payload')"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('enter_pack_active_read', 'cutover_book')"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('enter_pack_mode', 'cutover_book_readonly')"
+    )
+
+
+def _backfill_landings(conn: sqlite3.Connection) -> None:
+    """历史隔离行补齐落点行；指纹由条目键 + 舱码重算，旧的标记不再悬空。"""
+    from app.services.landing_fp import compute_fingerprint
+
+    rows = conn.execute(
+        """
+        SELECT r.id AS row_id, r.item_id, r.reason, i.item_key, b.bin_code
+        FROM quarantine_rows r
+        JOIN capture_items i ON i.id=r.item_id
+        JOIN quarantine_bins b ON b.id=r.bin_id
+        WHERE NOT EXISTS (SELECT 1 FROM enter_landings l WHERE l.item_id=r.item_id)
+        """
+    ).fetchall()
+    for r in rows:
+        conn.execute(
+            """
+            INSERT INTO enter_landings(item_id, row_id, item_key, bin_code, fingerprint, reason)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                r["item_id"],
+                r["row_id"],
+                r["item_key"],
+                r["bin_code"],
+                compute_fingerprint(r["item_key"], r["bin_code"]),
+                r["reason"] or "",
+            ),
+        )
+
+
 @contextmanager
-def get_db(db_path: str | Path | None = None):
+def get_db(db_path: str | Path | None = None, immediate: bool = False):
     path = Path(db_path) if db_path else Config.DATABASE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    if immediate:
+        # 写前先取排他锁：并发争抢同一坏件时串行化，后到者读到已入舱并遭拒。
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
         conn.commit()

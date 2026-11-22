@@ -1,7 +1,11 @@
 import { api } from '../api.js';
 
 export async function renderSettings(el) {
-  const data = await api('/api/settings');
+  const [data, overview, gate] = await Promise.all([
+    api('/api/settings'),
+    api('/api/enter_pack/overview'),
+    api('/api/enter_pack/gate'),
+  ]);
   el.innerHTML = `
     <div class="card">
       <h2>台参数</h2>
@@ -17,6 +21,21 @@ export async function renderSettings(el) {
             </tr>`).join('')}
         </tbody>
       </table>
+    </div>
+    <div class="card">
+      <h2>入舱口径（只读）</h2>
+      <p class="muted">甲边：切流账册锁定入舱瞬间条目键 + 舱码指纹，落点行拒回刷；清洗编排读账册现行引用。此页只照不写。</p>
+      <div class="stat-strip">
+        <div class="stat"><span class="muted">入舱标记</span><b>${overview.chip}</b></div>
+        <div class="stat"><span class="muted">坏件余数</span><b class="${overview.bad_remainder ? 'hot' : ''}">${overview.bad_remainder}</b></div>
+        <div class="stat"><span class="muted">入舱落点</span><b>${overview.landing_count}</b></div>
+        <div class="stat"><span class="muted">现行读引用</span><b>${overview.active_read}</b></div>
+        <div class="stat"><span class="muted">清洗闸门</span><b class="${gate.allowed ? 'okText' : 'badText'}">${gate.allowed ? '开' : '闭'}</b></div>
+      </div>
+      <p class="muted">最新落点指纹 ${overview.latest_fingerprint || '空'} · 入舱标记条目 ${gate.marked_count} / 落点行 ${gate.landing_count}</p>
+      ${gate.reasons.length
+        ? `<div class="hint-box bad">闸门闭：${gate.reasons.join('；')}</div>`
+        : '<div class="hint-box">闸门开：入舱标记均有落点行，指纹未拧花。</div>'}
     </div>`;
   el.querySelectorAll('[data-save]').forEach((btn) => {
     btn.onclick = async () => {
@@ -28,40 +47,4 @@ export async function renderSettings(el) {
       await renderSettings(el);
     };
   });
-
-  try {
-    const dash = await api('/api/enter_pack/dash');
-    el.innerHTML += `<div class="card" style="margin-top:1rem">
-      <h3>入舱钉定</h3>
-      <span class="chip">${dash.chip}</span>
-      <p class="muted">读轨 ${dash.active_read} · 切流指纹 ${dash.cutover_fp || '空'} · 拒回刷 ${dash.reject_refresh} · 归档 ${dash.archive_count} · 新旗 ${dash.live_flag || '空'} · 对齐差 ${dash.panel_pack_mismatch}</p>
-      <div class="row">
-        <button id="go_enter_pack" type="button">落台</button>
-        <button id="half_enter_pack" type="button">半修对齐</button>
-        <button id="cut_enter_pack" type="button">切流账册</button>
-        <button id="dual_enter_pack" type="button">双写两轨</button>
-      </div>
-    </div>`;
-    const go = el.querySelector('#go_enter_pack');
-    if (go) go.onclick = async () => {
-      await api('/api/enter_pack/commit', { method:'POST', body: JSON.stringify({ref:1}) });
-      await renderSettings(el);
-    };
-    const half = el.querySelector('#half_enter_pack');
-    if (half) half.onclick = async () => {
-      await api('/api/enter_pack/half', { method:'POST', body:'{}' });
-      await renderSettings(el);
-    };
-    const cut = el.querySelector('#cut_enter_pack');
-    if (cut) cut.onclick = async () => {
-      await api('/api/enter_pack/cutover', { method:'POST', body: JSON.stringify({ref_id:1, note:'入舱落点'}) });
-      await renderSettings(el);
-    };
-    const dual = el.querySelector('#dual_enter_pack');
-    if (dual) dual.onclick = async () => {
-      await api('/api/enter_pack/dual', { method:'POST', body: JSON.stringify({note:'入舱落点'}) });
-      await renderSettings(el);
-    };
-  } catch (e) { /* optional surface */ }
-
 }

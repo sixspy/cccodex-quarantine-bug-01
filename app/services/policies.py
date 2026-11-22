@@ -74,7 +74,10 @@ def set_enabled(rule_id: int, enabled: bool, db_path: str | None = None) -> dict
 
 
 def apply_to_batch(batch_id: int, db_path: str | None = None) -> dict:
-    """Apply enabled policy rules to pending bad items in a batch."""
+    """套规则触发清洗编排；先过入舱落点闸门，闸门不开整批拒绝。"""
+    from app.services import enter_pack as enter_pack_svc
+
+    enter_pack_svc.require_pipeline_gate(db_path)
     with get_db(db_path) as conn:
         batch = conn.execute(
             "SELECT * FROM capture_batches WHERE id=?", (batch_id,)
